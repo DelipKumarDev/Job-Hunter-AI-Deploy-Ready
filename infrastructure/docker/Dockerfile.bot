@@ -1,0 +1,75 @@
+# ──────────────────────────────────────────────────────────────
+# Job Hunter AI — Application Bot Worker
+#
+# Playwright stealth edition:
+#   playwright-extra + puppeteer-extra-plugin-stealth + Chromium
+#
+# Larger image (~1.4GB) due to Playwright browser binaries.
+# Run with: shm_size: 512m  and  security_opt: seccomp:unconfined
+# ──────────────────────────────────────────────────────────────
+
+# ── Stage 1: Build ────────────────────────────────────────────
+FROM node:20-bookworm-slim AS builder
+WORKDIR /app
+
+# Native build tools (needed by some stealth plugin deps)
+RUN apt-get update && apt-get install -y \
+    python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy manifests first (layer cache optimisation)
+COPY package*.json ./
+COPY packages/database/package*.json ./packages/database/
+COPY packages/shared/package*.json    ./packages/shared/
+COPY services/worker-bot/package*.json ./services/worker-bot/
+
+RUN npm ci --workspace=packages/database \
+           --workspace=packages/shared \
+           --workspace=services/worker-bot \
+           --omit=dev
+
+COPY packages/database/ ./packages/database/
+COPY packages/shared/   ./packages/shared/
+COPY services/worker-bot/ ./services/worker-bot/
+
+RUN npx prisma generate --schema=packages/database/prisma/schema.prisma
+
+RUN npm run build --workspace=packages/database \
+ && npm run build --workspace=packages/shared \
+ && npm run build --workspace=services/worker-bot
+
+# ── Stage 2: Playwright runtime ───────────────────────────────
+# Official Playwright image ships Chromium + all OS dependencies
+FROM mcr.microsoft.com/playwright:v1.44.0-jammy AS production
+WORKDIR /app
+
+# Non-root user
+RUN groupadd --system --gid 1001 nodejs \
+ && useradd  --system --uid 1001 --gid nodejs bot
+
+RUN apt-get update && apt-get install -y \
+    dumb-init curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy build outputs
+COPY --from=builder --chown=bot:nodejs /app/services/worker-bot/dist   ./dist
+COPY --from=builder --chown=bot:nodejs /app/packages/database/dist     ./packages/database/dist
+COPY --from=builder --chown=bot:nodejs /app/packages/shared/dist       ./packages/shared/dist
+COPY --from=builder --chown=bot:nodejs /app/node_modules               ./node_modules
+COPY --from=builder --chown=bot:nodejs /app/packages/database/prisma   ./prisma
+
+# Playwright environment
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV NODE_ENV=production
+
+# Bot configuration defaults (can be overridden per container)
+ENV BOT_CONCURRENCY=2
+ENV PLAYWRIGHT_HEADLESS=true
+
+USER bot
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/index.js"]
+
+HEALTHCHECK --interval=60s --timeout=15s --start-period=90s --retries=3 \
+  CMD node -e "require('./dist/health.js')" || exit 1

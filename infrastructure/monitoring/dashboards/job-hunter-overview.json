@@ -1,0 +1,193 @@
+{
+  "title": "Job Hunter AI — Platform Overview",
+  "uid": "jh-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["job-hunter-ai"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "API P95 Latency",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 0.5  },
+              { "color": "red",    "value": 2.0  }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service=\"api\"}[5m])) by (le))",
+        "legendFormat": "P95"
+      }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "API Error Rate",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] },
+        "unit": "percentunit" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 0.02 },
+              { "color": "red",    "value": 0.05 }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "sum(rate(http_requests_total{service=\"api\",status_code=~\"5..\"}[5m])) / sum(rate(http_requests_total{service=\"api\"}[5m]))",
+        "legendFormat": "Error Rate"
+      }]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Bot Success Rate (1h)",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null  },
+              { "color": "yellow", "value": 0.60  },
+              { "color": "green",  "value": 0.80  }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "sum(rate(bot_applications_total{status=\"applied\"}[1h])) / sum(rate(bot_applications_total{status=~\"applied|failed\"}[1h]))",
+        "legendFormat": "Success Rate"
+      }]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "DLQ Depth",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 10   },
+              { "color": "red",    "value": 50   }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "worker_dlq_depth",
+        "legendFormat": "DLQ Jobs"
+      }]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "API Request Rate by Status",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "sum by (status_code) (rate(http_requests_total{service=\"api\"}[1m]))",
+          "legendFormat": "HTTP {{status_code}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "API Latency Percentiles",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{service=\"api\"}[5m])) by (le))",
+          "legendFormat": "P50"
+        },
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service=\"api\"}[5m])) by (le))",
+          "legendFormat": "P95"
+        },
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service=\"api\"}[5m])) by (le))",
+          "legendFormat": "P99"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Worker Job Throughput",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "sum by (queue, status) (rate(worker_jobs_total[5m]))",
+          "legendFormat": "{{queue}} — {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Bot Applications (1h rolling)",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "sum by (status, portal) (rate(bot_applications_total[1h]) * 3600)",
+          "legendFormat": "{{portal}} — {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "logs",
+      "title": "Recent Errors (all services)",
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 8 },
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": false,
+        "prettifyLogMessage": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [{
+        "datasource": { "uid": "loki" },
+        "expr": "{env=\"production\", level=\"error\"} | json | line_format \"[{{.service}}] {{.msg}}\"",
+        "legendFormat": ""
+      }]
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+# ══════════════════════════════════════════════════════════════
+# Grafana — Datasource Provisioning
+# Auto-configured on Grafana startup. No manual UI setup needed.
+# ══════════════════════════════════════════════════════════════
+apiVersion: 1
+
+datasources:
+
+  # ── Prometheus — metrics ─────────────────────────────────
+  - name:      Prometheus
+    type:      prometheus
+    uid:       prometheus
+    url:       http://prometheus:9090
+    access:    proxy
+    isDefault: true
+    jsonData:
+      httpMethod:       POST
+      timeInterval:     15s
+      exemplarTraceIdDestinations:
+        - name:         traceID
+          datasourceUid: tempo
+    editable: false
+
+  # ── Loki — logs ──────────────────────────────────────────
+  - name:      Loki
+    type:      loki
+    uid:       loki
+    url:       http://loki:3100
+    access:    proxy
+    isDefault: false
+    jsonData:
+      maxLines:      5000
+      # Derived fields: turn requestId in logs into a trace link
+      derivedFields:
+        - matcherRegex:   '"requestId":"([^"]+)"'
+          name:           RequestID
+          url:            '/explore?orgId=1&left=["now-1h","now","Loki",{"expr":"{requestId=\"$${__value.raw}\"}"}]'
+          urlDisplayLabel: 'View request logs'
+    editable: false

@@ -1,0 +1,250 @@
+# ══════════════════════════════════════════════════════════════
+# Promtail — Log Collection Configuration
+#
+# Collection strategy: Docker service discovery
+#   Promtail mounts /var/run/docker.sock and reads container
+#   labels to discover all running containers. Logs arrive via
+#   Docker's json-file driver (configured in docker-compose).
+#
+# Label model (every log line gets these labels):
+#   container  → Docker container name   (e.g. jh-api)
+#   service    → Logical service name     (e.g. api)
+#   env        → production | development
+#   level      → Extracted from JSON log  (info|warn|error|debug)
+#   requestId  → Extracted from JSON log  (for request tracing)
+#
+# Per-source pipelines:
+#   API/workers → JSON structured logs (Pino NDJSON)
+#   Nginx       → Pre-formatted JSON access + error logs
+#   Playwright  → JSON logs with extra bot fields
+#
+# Log discovery is zero-config: any new container is picked up
+# automatically via the Docker socket. No Promtail restart needed.
+# ══════════════════════════════════════════════════════════════
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+# ── Positions file — tracks how far each log file has been read ─
+positions:
+  filename: /tmp/positions.yaml
+
+# ── Loki push target ──────────────────────────────────────────
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    # Batch settings
+    batchwait:   1s
+    batchsize:   1048576   # 1 MiB
+    # Retry on Loki unavailability
+    backoff_config:
+      min_period:  500ms
+      max_period:  5m
+      max_retries: 10
+    # External labels applied to every log line
+    external_labels:
+      env: production
+
+# ══════════════════════════════════════════════════════════════
+# Scrape Configs
+# ══════════════════════════════════════════════════════════════
+scrape_configs:
+
+  # ──────────────────────────────────────────────────────────
+  # 1. All Docker containers — auto-discovery via Docker socket
+  #    Picks up every container; per-service pipelines refine.
+  # ──────────────────────────────────────────────────────────
+  - job_name: docker-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          # Only collect from containers in the job-hunter-ai project
+          - name: label
+            values: ["com.docker.compose.project=job-hunter-ai"]
+
+    relabel_configs:
+      # container label → container name (jh-api, jh-worker-bot, etc.)
+      - source_labels: [__meta_docker_container_name]
+        regex:        /(.*)
+        target_label: container
+        replacement:  $1
+
+      # Derive logical service name by stripping the "jh-" prefix
+      - source_labels: [container]
+        regex:         jh-(.+)
+        target_label:  service
+        replacement:   $1
+
+      # Keep the Docker image as a label (useful for version tracking)
+      - source_labels: [__meta_docker_container_image]
+        target_label:  image
+
+      # Docker log path  → __path__ (Promtail reads from here)
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label:  stream
+
+    # Pipeline: parse structured JSON logs, extract level + requestId
+    pipeline_stages:
+
+      # ── Parse JSON log lines (Pino / nginx JSON format) ────
+      - json:
+          expressions:
+            level:     level
+            msg:       msg
+            service:   service
+            requestId: requestId
+            userId:    userId
+            time:      time
+
+      # ── Promote level to a Loki label (enables fast filtering) ─
+      # Only allow known levels to prevent label cardinality explosion
+      - labels:
+          level:
+          service:
+
+      # ── Normalize log level values ─────────────────────────
+      # Pino uses numeric levels; map to strings
+      - replace:
+          expression: ^10$
+          replace:    trace
+          source:     level
+      - replace:
+          expression: ^20$
+          replace:    debug
+          source:     level
+      - replace:
+          expression: ^30$
+          replace:    info
+          source:     level
+      - replace:
+          expression: ^40$
+          replace:    warn
+          source:     level
+      - replace:
+          expression: ^50$
+          replace:    error
+          source:     level
+      - replace:
+          expression: ^60$
+          replace:    fatal
+          source:     level
+
+      # ── Use the log's own timestamp if present ──────────────
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+          fallback_formats:
+            - RFC3339
+            - UnixMs
+
+      # ── Drop debug logs in production to reduce storage ─────
+      # Comment this out if you need debug logs temporarily
+      - drop:
+          expression: "debug"
+          source:     level
+
+      # ── Drop health-check noise from nginx ─────────────────
+      - drop:
+          expression: '"/health"'
+          source:     msg
+
+  # ──────────────────────────────────────────────────────────
+  # 2. Nginx access log (file-based, in addition to Docker stdout)
+  #    Nginx writes to /var/log/nginx/ inside the container.
+  #    We mount that volume and read directly.
+  # ──────────────────────────────────────────────────────────
+  - job_name: nginx-access
+    static_configs:
+      - targets: [localhost]
+        labels:
+          service:    nginx
+          log_type:   access
+          __path__:   /var/log/nginx/access.log
+
+    pipeline_stages:
+      - json:
+          expressions:
+            method:       method
+            uri:          uri
+            status:       status
+            request_time: request_time
+            request_id:   request_id
+
+      # Map HTTP status to log level
+      - template:
+          source: level
+          template: >-
+            {{ if ge (int .status) 500 }}error
+            {{ else if ge (int .status) 400 }}warn
+            {{ else }}info{{ end }}
+
+      - labels:
+          level:
+          status:
+
+  - job_name: nginx-error
+    static_configs:
+      - targets: [localhost]
+        labels:
+          service:    nginx
+          log_type:   error
+          level:      error
+          __path__:   /var/log/nginx/error.log
+
+    pipeline_stages:
+      - regex:
+          expression: '.*\[(?P<level>\w+)\].*'
+      - labels:
+          level:
+
+  # ──────────────────────────────────────────────────────────
+  # 3. Playwright bot — extra pipeline for bot-specific fields
+  #    Same Docker discovery but with additional field extraction
+  # ──────────────────────────────────────────────────────────
+  - job_name: playwright-bot
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["jh-worker-bot"]
+
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex:         /(.*)
+        target_label:  container
+        replacement:   $1
+      - target_label: service
+        replacement:  worker-bot
+
+    pipeline_stages:
+      - json:
+          expressions:
+            level:         level
+            applicationId: applicationId
+            jobListingId:  jobListingId
+            portal:        portal
+            captchaType:   captchaType
+            durationMs:    durationMs
+            status:        status
+            time:          time
+
+      - labels:
+          level:
+          status:      # applied|failed|skipped|captcha
+          portal:      # linkedin|greenhouse|lever|workday etc.
+
+      # Track captcha events with dedicated label
+      - labels:
+          captchaType:
+
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+
+      # Drop debug noise
+      - drop:
+          expression: "debug"
+          source:     level

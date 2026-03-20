@@ -1,0 +1,761 @@
+# ══════════════════════════════════════════════════════════════
+# Job Hunter AI — Production Docker Compose
+# Security hardened edition
+#
+# NETWORK TOPOLOGY (four isolated planes)
+# ────────────────────────────────────────
+#   external    — internet-facing; nginx only
+#   app         — app tier: nginx ↔ api ↔ web
+#   data        — data tier: api/workers ↔ postgres/redis/pgbouncer
+#                 marked internal:true — NO outbound internet
+#   monitoring  — observability: prometheus/grafana/loki/promtail
+#                 marked internal:true — NO outbound internet
+#
+# WHY FOUR NETWORKS?
+#   Flat networks let every container reach every other container.
+#   With four planes:
+#     • Monitoring containers cannot reach postgres/redis directly
+#     • Workers cannot reach nginx (no outbound proxying)
+#     • A compromised nginx cannot reach the database
+#     • Promtail has Docker socket access but cannot reach the DB
+#
+# PLAYWRIGHT CONTAINER HARDENING
+# ───────────────────────────────
+#   cap_drop: ALL            — drops all 38 Linux capabilities
+#   cap_add: [SYS_ADMIN]     — required by Chrome sandbox (namespace clone)
+#   security_opt:
+#     no-new-privileges:true — prevents privilege escalation via setuid
+#     seccomp:unconfined     — required by Chromium (uses many syscalls)
+#                              TODO: replace with a chromium-specific profile
+#
+# Profiles:
+#   (default)   — all app + infrastructure services
+#   monitoring  — adds Prometheus, Grafana, Loki, Promtail, cAdvisor,
+#                 postgres-exporter, redis-exporter, nginx-exporter
+#
+# Start with monitoring:
+#   docker compose -f docker-compose.prod.yml --profile monitoring up -d
+# ══════════════════════════════════════════════════════════════
+
+name: job-hunter-ai
+
+# ── Common app config ──────────────────────────────────────────
+x-common-config: &common-config
+  NODE_ENV:           production
+  LOG_LEVEL:          info
+  LOG_PRETTY:         "false"
+  REDIS_HOST:         redis
+  REDIS_PORT:         "6379"
+  REDIS_QUEUE_PREFIX: jhq
+
+# ── Secret file paths ──────────────────────────────────────────
+x-secret-paths-core: &secret-paths-core
+  DATABASE_URL_FILE: /run/secrets/db_url
+  REDIS_URL_FILE:    /run/secrets/redis_url
+
+x-secret-paths-api: &secret-paths-api
+  JWT_SECRET_FILE:            /run/secrets/jwt_secret
+  JWT_REFRESH_SECRET_FILE:    /run/secrets/jwt_refresh_secret
+  COOKIE_SECRET_FILE:         /run/secrets/cookie_secret
+  GOOGLE_CLIENT_SECRET_FILE:  /run/secrets/gmail_client_secret
+  AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
+
+x-secret-paths-ai: &secret-paths-ai
+  ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
+
+x-secret-paths-notification: &secret-paths-notification
+  WHATSAPP_ACCESS_TOKEN_FILE: /run/secrets/whatsapp_access_token
+  WHATSAPP_APP_SECRET_FILE:   /run/secrets/whatsapp_app_secret
+  WHATSAPP_VERIFY_TOKEN_FILE: /run/secrets/whatsapp_verify_token
+
+x-secret-paths-email: &secret-paths-email
+  GOOGLE_CLIENT_SECRET_FILE: /run/secrets/gmail_client_secret
+  ENCRYPTION_KEY_FILE:       /run/secrets/encryption_key
+
+# ── Secret mount lists ─────────────────────────────────────────
+x-secrets-core: &secrets-core
+  - db_url
+  - redis_url
+
+x-secrets-api: &secrets-api
+  - db_url
+  - redis_url
+  - jwt_secret
+  - jwt_refresh_secret
+  - cookie_secret
+  - gmail_client_secret
+  - aws_secret_access_key
+
+x-secrets-ai: &secrets-ai
+  - db_url
+  - redis_url
+  - anthropic_api_key
+
+x-secrets-email: &secrets-email
+  - db_url
+  - redis_url
+  - anthropic_api_key
+  - gmail_client_secret
+  - encryption_key
+
+x-secrets-notification: &secrets-notification
+  - db_url
+  - redis_url
+  - anthropic_api_key
+  - whatsapp_access_token
+  - whatsapp_app_secret
+  - whatsapp_verify_token
+
+x-secrets-resume: &secrets-resume
+  - db_url
+  - redis_url
+  - anthropic_api_key
+  - aws_secret_access_key
+
+# ── Worker base ────────────────────────────────────────────────
+# Workers are on 'data' network (can reach DB/Redis) but NOT on
+# 'app' network (cannot reach nginx/web), and NOT on 'monitoring'.
+x-worker-base: &worker-base
+  restart: unless-stopped
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis:    { condition: service_healthy }
+    migrate:  { condition: service_completed_successfully }
+  networks: [data]
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+      tag: "{{.Name}}"
+
+# ══════════════════════════════════════════════════════════════
+# Services
+# ══════════════════════════════════════════════════════════════
+services:
+
+  # ── Nginx ── external + app ──────────────────────────────
+  # The ONLY service on both 'external' and 'app' networks.
+  # Terminates TLS, enforces Cloudflare IP allowlist and rate limits.
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: jh-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./infrastructure/nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-logs:/var/log/nginx
+    depends_on: [web, api]
+    networks: [external, app]
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5", tag: "{{.Name}}" }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Next.js Web ── app ────────────────────────────────────
+  # On 'app' only. Reachable from nginx. Cannot reach DB.
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.web
+    container_name: jh-web
+    restart: unless-stopped
+    environment:
+      <<: *common-config
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.jobhunter.ai}
+    networks: [app]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources: { limits: { memory: 512m, cpus: "0.5" } }
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5", tag: "{{.Name}}" }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── API ── app + data ─────────────────────────────────────
+  # Bridges the app tier (serves HTTP) and data tier (reads DB/Redis).
+  # Two networks: receives requests from nginx (app), reads DB (data).
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: jh-api
+    restart: unless-stopped
+    environment:
+      <<: *common-config
+      <<: *secret-paths-core
+      <<: *secret-paths-api
+      <<: *secret-paths-ai
+      PORT: "3001"
+      CORS_ORIGINS:             ${CORS_ORIGINS:-https://jobhunter.ai}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID}
+      GMAIL_CLIENT_ID:          ${GMAIL_CLIENT_ID}
+      AWS_S3_BUCKET:            ${AWS_S3_BUCKET}
+      AWS_REGION:               ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID:        ${AWS_ACCESS_KEY_ID}
+      STRIPE_PUBLISHABLE_KEY:   ${STRIPE_PUBLISHABLE_KEY}
+    secrets: *secrets-api
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      migrate:  { condition: service_completed_successfully }
+    networks: [app, data]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources: { limits: { memory: 1g, cpus: "1.0" } }
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "10", tag: "{{.Name}}" }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Playwright Bot ── data ────────────────────────────────
+  # Hardened Chromium container:
+  #   cap_drop: ALL        — remove all 38 Linux capabilities
+  #   cap_add: SYS_ADMIN   — Chrome needs this for namespace sandbox
+  #   no-new-privileges    — child processes can't gain new caps
+  #   seccomp:unconfined   — Chrome uses many syscalls; a custom
+  #                          Chrome seccomp profile would be better
+  #                          (see infrastructure/seccomp/chrome.json)
+  #   read_only: true + tmpfs mounts — filesystem is read-only except
+  #   for the temp dirs Chrome/Playwright need for runtime files
+  worker-bot:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.bot
+    container_name: jh-worker-bot
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      migrate:  { condition: service_completed_successfully }
+    environment:
+      <<: *common-config
+      <<: *secret-paths-core
+      <<: *secret-paths-ai
+      BOT_CONCURRENCY: "2"
+      PLAYWRIGHT_HEADLESS: "true"
+      PROXY_POOL: ${PROXY_POOL}
+    secrets: *secrets-ai
+    networks: [data]
+    shm_size: "512m"
+
+    # ── Linux capability hardening ────────────────────────────
+    cap_drop:
+      - ALL                 # Start from zero capabilities
+    cap_add:
+      - SYS_ADMIN           # Chrome sandbox requires user namespace clone
+
+    # ── Security options ──────────────────────────────────────
+    security_opt:
+      - no-new-privileges:true    # Prevent setuid/setcap escalation
+      - seccomp:unconfined        # Chrome needs broad syscall access
+                                  # Future: replace with chrome-seccomp.json
+
+    # ── Read-only root filesystem ──────────────────────────────
+    # Chrome writes to /tmp, /dev/shm, and /home/bot/.config at runtime.
+    # All other paths are immutable — even a RCE can't modify binaries.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /run:size=32m
+      - /home/bot/.config:size=64m,mode=0700
+      - /home/bot/.cache:size=128m,mode=0700
+
+    deploy:
+      resources: { limits: { memory: 3g, cpus: "2.0" } }
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5", tag: "{{.Name}}" }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Scraper Worker ── data ────────────────────────────────
+  worker-scraper:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+      args: { WORKER: scraper }
+    container_name: jh-worker-scraper
+    <<: *worker-base
+    environment:
+      <<: *common-config
+      <<: *secret-paths-core
+      SCRAPER_CONCURRENCY: "3"
+    secrets: *secrets-core
+    deploy:
+      resources: { limits: { memory: 1g, cpus: "1.0" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── AI Match Worker ── data ───────────────────────────────
+  worker-ai:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+      args: { WORKER: ai }
+    container_name: jh-worker-ai
+    <<: *worker-base
+    environment:
+      <<: *common-config
+      <<: *secret-paths-core
+      <<: *secret-paths-ai
+      AI_CONCURRENCY: "10"
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY}
+    secrets: *secrets-ai
+    deploy:
+      resources: { limits: { memory: 1g, cpus: "1.0" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Email Worker ── data ──────────────────────────────────
+  worker-email:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+      args: { WORKER: email }
+    container_name: jh-worker-email
+    <<: *worker-base
+    environment:
+      <<: *common-config
+      <<: *secret-paths-core
+      <<: *secret-paths-ai
+      <<: *secret-paths-email
+      EMAIL_CONCURRENCY: "5"
+      GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID}
+    secrets: *secrets-email
+    deploy:
+      resources: { limits: { memory: 512m, cpus: "0.5" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Notification Worker ── data ───────────────────────────
+  worker-notification:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+      args: { WORKER: notification }
+    container_name: jh-worker-notification
+    <<: *worker-base
+    environment:
+      <<: *common-config
+      <<: *secret-paths-core
+      <<: *secret-paths-ai
+      <<: *secret-paths-notification
+      NOTIFICATION_CONCURRENCY: "20"
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID}
+    secrets: *secrets-notification
+    deploy:
+      resources: { limits: { memory: 512m, cpus: "0.5" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Resume Worker ── data ─────────────────────────────────
+  worker-resume:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+      args: { WORKER: resume }
+    container_name: jh-worker-resume
+    <<: *worker-base
+    environment:
+      <<: *common-config
+      <<: *secret-paths-core
+      <<: *secret-paths-ai
+      RESUME_CONCURRENCY: "5"
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
+      AWS_S3_BUCKET:     ${AWS_S3_BUCKET}
+      AWS_REGION:        ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    secrets: *secrets-resume
+    deploy:
+      resources: { limits: { memory: 1g, cpus: "1.0" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Interview Prep Worker ── data ─────────────────────────
+  worker-prep:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+      args: { WORKER: prep }
+    container_name: jh-worker-prep
+    <<: *worker-base
+    environment:
+      <<: *common-config
+      <<: *secret-paths-core
+      <<: *secret-paths-ai
+      PREP_CONCURRENCY: "3"
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
+      AWS_S3_BUCKET:     ${AWS_S3_BUCKET}
+      AWS_REGION:        ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    secrets: *secrets-resume
+    deploy:
+      resources: { limits: { memory: 2g, cpus: "1.5" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── PostgreSQL ── data ────────────────────────────────────
+  # On 'data' only. Unreachable from nginx, web, or monitoring.
+  postgres:
+    image: postgres:16-alpine
+    container_name: jh-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:            ${POSTGRES_DB:-jobhunter}
+      POSTGRES_USER:          ${POSTGRES_USER:-jhuser}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    secrets: [postgres_password]
+    command: >
+      postgres
+        -c max_connections=200
+        -c shared_buffers=256MB
+        -c effective_cache_size=1GB
+        -c maintenance_work_mem=64MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c work_mem=4MB
+        -c wal_level=replica
+        -c log_connections=off
+        -c log_disconnections=off
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jhuser} -d ${POSTGRES_DB:-jobhunter}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources: { limits: { memory: 2g, cpus: "2.0" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── PgBouncer ── data ─────────────────────────────────────
+  pgbouncer:
+    image: bitnami/pgbouncer:1.22.1
+    container_name: jh-pgbouncer
+    restart: unless-stopped
+    environment:
+      POSTGRESQL_HOST:               postgres
+      POSTGRESQL_PORT:               "5432"
+      POSTGRESQL_DATABASE:           ${POSTGRES_DB:-jobhunter}
+      POSTGRESQL_USERNAME:           ${POSTGRES_USER:-jhuser}
+      POSTGRESQL_PASSWORD_FILE:      /run/secrets/postgres_password
+      PGBOUNCER_POOL_MODE:           transaction
+      PGBOUNCER_MAX_CLIENT_CONN:     "500"
+      PGBOUNCER_DEFAULT_POOL_SIZE:   "25"
+      PGBOUNCER_MIN_POOL_SIZE:       "5"
+      PGBOUNCER_RESERVE_POOL_SIZE:   "10"
+    secrets: [postgres_password]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [data]
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+
+  # ── Database Migration (runs once at startup) ─────────────
+  # Runs prisma migrate deploy before API and workers start.
+  # Restarts on failure so transient postgres startup races are handled.
+  # Once complete, exits 0 and Docker marks it as "exited (0)".
+  migrate:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: jh-migrate
+    command: ["sh", "-c", "npx prisma migrate deploy --schema=./prisma/schema.prisma && echo 'Migrations complete'"]
+    environment:
+      <<: *secret-paths-core
+    secrets: [db_url, redis_url]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [data]
+    restart: "no"
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Redis ── data ─────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: jh-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+      - ./infrastructure/scripts/redis-entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
+    secrets: [redis_password]
+    entrypoint: ["/bin/sh", "/usr/local/bin/redis-entrypoint.sh"]
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $(cat /run/secrets/redis_password) ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources: { limits: { memory: 768m, cpus: "0.5" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ════════════════════════════════════════════════════════════
+  # MONITORING PROFILE (--profile monitoring)
+  # All on 'monitoring' network — isolated from 'data'.
+  # Exception: prometheus/promtail need to scrape worker :9100
+  # ports, so they join 'data' too (read-only scrape traffic).
+  # ════════════════════════════════════════════════════════════
+
+  # ── Loki ── monitoring ────────────────────────────────────
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: jh-loki
+    restart: unless-stopped
+    profiles: [monitoring]
+    volumes:
+      - ./infrastructure/loki/loki-config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/config.yml
+    networks: [monitoring]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources: { limits: { memory: 1g, cpus: "1.0" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Promtail ── monitoring (+ Docker socket) ──────────────
+  # Needs Docker socket to discover containers.
+  # Does NOT need the 'data' network — it reads log files,
+  # not live connections to services.
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: jh-promtail
+    restart: unless-stopped
+    profiles: [monitoring]
+    volumes:
+      - ./infrastructure/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - nginx-logs:/var/log/nginx:ro
+      - promtail-positions:/tmp
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      loki: { condition: service_healthy }
+    networks: [monitoring]
+    user: "0"
+    deploy:
+      resources: { limits: { memory: 256m, cpus: "0.25" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Prometheus ── monitoring + data ──────────────────────
+  # Joins 'data' so it can scrape worker :9100 metrics endpoints.
+  # Does NOT join 'app' — no access to nginx/web.
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: jh-prometheus
+    restart: unless-stopped
+    profiles: [monitoring]
+    volumes:
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/monitoring/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-remote-write-receiver'
+    networks: [monitoring, data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy | grep -q Healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources: { limits: { memory: 1g, cpus: "1.0" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Grafana ── monitoring ─────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: jh-grafana
+    restart: unless-stopped
+    profiles: [monitoring]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_password
+      GF_SERVER_ROOT_URL:               https://monitor.jobhunter.ai
+      GF_AUTH_ANONYMOUS_ENABLED:        "false"
+      GF_FEATURE_TOGGLES_ENABLE:        "lokiExploreLogsEnabled"
+      GF_PATHS_PROVISIONING:            /etc/grafana/provisioning
+      # Prevent Grafana from reaching public internet for plugin updates
+      GF_PLUGIN_GRPC_ADDRESS:           ""
+    secrets: [grafana_password]
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infrastructure/monitoring/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/monitoring/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus: { condition: service_healthy }
+      loki:       { condition: service_healthy }
+    networks: [monitoring]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources: { limits: { memory: 512m, cpus: "0.5" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── cAdvisor ── monitoring ────────────────────────────────
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: jh-cadvisor
+    restart: unless-stopped
+    profiles: [monitoring]
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [monitoring]
+    deploy:
+      resources: { limits: { memory: 256m, cpus: "0.25" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── PostgreSQL Exporter ── monitoring + data ──────────────
+  # Needs 'data' to connect to postgres; exports metrics to Prometheus.
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: jh-postgres-exporter
+    restart: unless-stopped
+    profiles: [monitoring]
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-jhuser}@postgres:5432/${POSTGRES_DB:-jobhunter}?sslmode=disable"
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [monitoring, data]
+    deploy:
+      resources: { limits: { memory: 64m, cpus: "0.1" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Redis Exporter ── monitoring + data ───────────────────
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    container_name: jh-redis-exporter
+    restart: unless-stopped
+    profiles: [monitoring]
+    environment:
+      REDIS_ADDR:          redis://redis:6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+    secrets: [redis_password]
+    depends_on:
+      redis: { condition: service_healthy }
+    networks: [monitoring, data]
+    deploy:
+      resources: { limits: { memory: 64m, cpus: "0.1" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+  # ── Nginx Exporter ── monitoring + app ───────────────────
+  # Needs 'app' to reach nginx's /stub_status endpoint.
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.1.0
+    container_name: jh-nginx-exporter
+    restart: unless-stopped
+    profiles: [monitoring]
+    command: --nginx.scrape-uri=http://nginx:8080/stub_status
+    depends_on: [nginx]
+    networks: [monitoring, app]
+    deploy:
+      resources: { limits: { memory: 32m, cpus: "0.05" } }
+    labels:
+      com.docker.compose.project: job-hunter-ai
+
+# ══════════════════════════════════════════════════════════════
+# Secrets
+# ══════════════════════════════════════════════════════════════
+secrets:
+  db_url:                { file: ./secrets/db_url }
+  redis_url:             { file: ./secrets/redis_url }
+  jwt_secret:            { file: ./secrets/jwt_secret }
+  jwt_refresh_secret:    { file: ./secrets/jwt_refresh_secret }
+  cookie_secret:         { file: ./secrets/cookie_secret }
+  anthropic_api_key:     { file: ./secrets/anthropic_api_key }
+  gmail_client_secret:   { file: ./secrets/gmail_client_secret }
+  whatsapp_access_token: { file: ./secrets/whatsapp_access_token }
+  whatsapp_app_secret:   { file: ./secrets/whatsapp_app_secret }
+  whatsapp_verify_token: { file: ./secrets/whatsapp_verify_token }
+  encryption_key:        { file: ./secrets/encryption_key }
+  aws_secret_access_key: { file: ./secrets/aws_secret_access_key }
+  postgres_password:     { file: ./secrets/postgres_password }
+  redis_password:        { file: ./secrets/redis_password }
+  grafana_password:      { file: ./secrets/grafana_password }
+
+# ══════════════════════════════════════════════════════════════
+# Networks — four isolated planes
+# ══════════════════════════════════════════════════════════════
+networks:
+
+  # Internet-facing: nginx only
+  external:
+    driver: bridge
+
+  # App tier: nginx ↔ api ↔ web
+  app:
+    driver: bridge
+    internal: true      # No direct outbound internet from app containers
+
+  # Data tier: api, workers ↔ postgres, pgbouncer, redis
+  data:
+    driver: bridge
+    internal: true      # No internet — all external calls go through api
+
+  # Observability: prometheus, grafana, loki, promtail, exporters
+  monitoring:
+    driver: bridge
+    internal: true      # No internet — dashboards are accessed via nginx
+
+# ══════════════════════════════════════════════════════════════
+# Volumes
+# ══════════════════════════════════════════════════════════════
+volumes:
+  postgres-data:
+  redis-data:
+  nginx-logs:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  promtail-positions:

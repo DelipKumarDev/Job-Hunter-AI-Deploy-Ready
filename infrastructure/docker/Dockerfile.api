@@ -1,0 +1,72 @@
+# ──────────────────────────────────────────────────────────────
+# Job Hunter AI — API Service
+# Multi-stage build: builder → production
+# Final image ~180MB (node:20-alpine base)
+# ──────────────────────────────────────────────────────────────
+
+# ── Stage 1: deps ─────────────────────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+# Install build deps for native modules (bcrypt, sharp, canvas)
+RUN apk add --no-cache python3 make g++ libc6-compat
+
+COPY package*.json ./
+COPY packages/database/package*.json ./packages/database/
+COPY packages/shared/package*.json    ./packages/shared/
+COPY services/api/package*.json       ./services/api/
+
+RUN npm ci --workspace=packages/database \
+           --workspace=packages/shared \
+           --workspace=services/api \
+           --omit=dev
+
+# ── Stage 2: builder ──────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules        ./node_modules
+COPY --from=deps /app/packages            ./packages
+COPY --from=deps /app/services/api        ./services/api
+
+COPY packages/database/ ./packages/database/
+COPY packages/shared/   ./packages/shared/
+COPY services/api/      ./services/api/
+
+# Generate Prisma client
+RUN npx prisma generate --schema=packages/database/prisma/schema.prisma
+
+# Compile TypeScript
+RUN npm run build --workspace=packages/database \n && npm run build --workspace=packages/shared \
+ && npm run build --workspace=services/api
+
+# ── Stage 3: production ───────────────────────────────────────
+FROM node:20-alpine AS production
+WORKDIR /app
+
+# Security: run as non-root
+RUN addgroup --system --gid 1001 nodejs \
+ && adduser  --system --uid 1001 api
+
+# Runtime deps only
+RUN apk add --no-cache dumb-init curl
+
+COPY --from=builder --chown=api:nodejs /app/services/api/dist     ./dist
+COPY --from=builder --chown=api:nodejs /app/packages/database/dist ./packages/database/dist
+COPY --from=builder --chown=api:nodejs /app/packages/shared/dist   ./packages/shared/dist
+COPY --from=builder --chown=api:nodejs /app/node_modules           ./node_modules
+COPY --from=builder --chown=api:nodejs /app/packages/database/prisma ./prisma
+
+USER api
+
+ENV NODE_ENV=production \
+    PORT=3001
+
+EXPOSE 3001
+
+# dumb-init handles signals correctly in containers
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/index.js"]
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:3001/health || exit 1

@@ -1,0 +1,56 @@
+version: '3.9'
+
+# ============================================================
+# Docker Compose — Development Override
+# Adds: hot reload volumes, debug ports, verbose logging
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# ============================================================
+
+services:
+  api:
+    command: npm run dev
+    environment:
+      LOG_LEVEL: debug
+      DATABASE_LOG_QUERIES: "true"
+    volumes:
+      - ./services/api/src:/app/src
+
+  web:
+    command: npm run dev
+    environment:
+      NEXT_PUBLIC_DEBUG: "true"
+
+  worker-scraper:
+    command: npm run dev
+    environment:
+      PLAYWRIGHT_HEADLESS: "false"  # Show browser in dev
+
+  worker-bot:
+    command: npm run dev
+    environment:
+      PLAYWRIGHT_HEADLESS: "false"
+      PLAYWRIGHT_SLOW_MO: "500"    # Slow down for debugging
+
+  worker-ai:
+    command: npm run dev
+
+  worker-email:
+    command: npm run dev
+    environment:
+      EMAIL_MONITOR_INTERVAL_MS: "60000"  # 1 min in dev vs 15min prod
+
+  worker-notification:
+    command: npm run dev
+
+  # Adminer — lightweight DB UI for dev
+  adminer:
+    image: adminer:latest
+    container_name: jh-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    networks:
+      - job-hunter-net
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: flat

@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+*.js.map
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.production.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime
+pids/
+*.pid
+*.seed
+
+# Docker
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Test
+coverage/
+.nyc_output/
+
+# Playwright
+test-results/
+playwright-report/
+
+# Turbo
+.turbo/
+
+# AWS
+*.pem
+
+# Docker secrets — never commit these
+secrets/
+!secrets/.gitkeep

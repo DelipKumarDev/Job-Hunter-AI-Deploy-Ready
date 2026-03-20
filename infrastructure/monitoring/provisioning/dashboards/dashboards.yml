@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name:            job-hunter-ai
+    orgId:           1
+    folder:          Job Hunter AI
+    folderUid:       job-hunter-ai
+    type:            file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates:  false
+    options:
+      path:          /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

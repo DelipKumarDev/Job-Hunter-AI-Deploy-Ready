@@ -1,0 +1,70 @@
+# ──────────────────────────────────────────────────────────────
+# Job Hunter AI — Worker Services
+# Shared Dockerfile for all worker services.
+# Build arg WORKER selects which service to build:
+#   scraper | ai | bot | email | notification | resume | prep
+#
+# Usage:
+#   docker build --build-arg WORKER=scraper -f Dockerfile.worker .
+# ──────────────────────────────────────────────────────────────
+
+ARG WORKER=scraper
+
+# ── Stage 1: deps ─────────────────────────────────────────────
+FROM node:20-alpine AS deps
+ARG WORKER
+WORKDIR /app
+
+RUN apk add --no-cache python3 make g++ libc6-compat
+
+COPY package*.json ./
+COPY packages/database/package*.json ./packages/database/
+COPY packages/shared/package*.json    ./packages/shared/
+COPY services/worker-${WORKER}/package*.json ./services/worker-${WORKER}/
+
+RUN npm ci --workspace=packages/database \
+           --workspace=packages/shared \
+           --workspace=services/worker-${WORKER} \
+           --omit=dev
+
+# ── Stage 2: builder ──────────────────────────────────────────
+FROM node:20-alpine AS builder
+ARG WORKER
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+
+COPY packages/database/ ./packages/database/
+COPY packages/shared/   ./packages/shared/
+COPY services/worker-${WORKER}/ ./services/worker-${WORKER}/
+
+RUN npx prisma generate --schema=packages/database/prisma/schema.prisma
+RUN npm run build --workspace=packages/database \n && npm run build --workspace=packages/shared \
+ && npm run build --workspace=services/worker-${WORKER}
+
+# ── Stage 3: production ───────────────────────────────────────
+FROM node:20-alpine AS production
+ARG WORKER
+WORKDIR /app
+
+RUN addgroup --system --gid 1001 nodejs \
+ && adduser  --system --uid 1001 worker
+
+RUN apk add --no-cache dumb-init curl
+
+COPY --from=builder --chown=worker:nodejs /app/services/worker-${WORKER}/dist ./dist
+COPY --from=builder --chown=worker:nodejs /app/packages/database/dist          ./packages/database/dist
+COPY --from=builder --chown=worker:nodejs /app/packages/shared/dist            ./packages/shared/dist
+COPY --from=builder --chown=worker:nodejs /app/node_modules                    ./node_modules
+COPY --from=builder --chown=worker:nodejs /app/packages/database/prisma        ./prisma
+
+USER worker
+
+ENV NODE_ENV=production \
+    WORKER_NAME=${WORKER}
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/index.js"]
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+  CMD node -e "require('./dist/health.js')" || exit 1

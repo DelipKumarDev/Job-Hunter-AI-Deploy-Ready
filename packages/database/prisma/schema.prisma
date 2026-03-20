@@ -1,0 +1,681 @@
+// ============================================================
+// JOB HUNTER AI AGENT — PRISMA ORM SCHEMA
+// PostgreSQL Database
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum SkillProficiency {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+  EXPERT
+}
+
+enum JobType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  FREELANCE
+  INTERNSHIP
+}
+
+enum RemoteType {
+  REMOTE
+  HYBRID
+  ON_SITE
+}
+
+enum JobSource {
+  LINKEDIN
+  INDEED
+  NAUKRI
+  WELLFOUND
+  COMPANY_PAGE
+  GLASSDOOR
+  OTHER
+}
+
+enum MatchRecommendation {
+  YES
+  MAYBE
+  NO
+}
+
+enum ApplicationStatus {
+  PENDING         // Queued, not yet applied
+  APPLYING        // Bot currently submitting
+  APPLIED         // Successfully submitted
+  UNDER_REVIEW    // Recruiter viewed application
+  INTERVIEW       // Interview scheduled
+  OFFER           // Offer received
+  REJECTED        // Application rejected
+  WITHDRAWN       // User withdrew application
+  FAILED          // Bot failed to apply
+}
+
+enum EmailClassification {
+  RECRUITER_REPLY
+  INTERVIEW_INVITE
+  REJECTION
+  AUTO_RESPONSE
+  OFFER_LETTER
+  REQUEST_FOR_INFO
+  OTHER
+}
+
+enum FollowUpStatus {
+  SCHEDULED
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum InterviewType {
+  PHONE_SCREEN
+  VIDEO_CALL
+  TECHNICAL
+  BEHAVIORAL
+  PANEL
+  ONSITE
+  FINAL_ROUND
+}
+
+enum InterviewStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+  RESCHEDULED
+  NO_SHOW
+}
+
+enum NotificationChannel {
+  WHATSAPP
+  EMAIL
+  PUSH
+  IN_APP
+}
+
+enum NotificationType {
+  RECRUITER_REPLIED
+  INTERVIEW_INVITE
+  OFFER_RECEIVED
+  APPLICATION_APPLIED
+  APPLICATION_FAILED
+  JOB_MATCH_FOUND
+  FOLLOW_UP_SENT
+  PREP_READY
+  SYSTEM
+}
+
+enum SubscriptionPlan {
+  FREE
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELLED
+  UNPAID
+  PAUSED
+}
+
+enum EmailProvider {
+  GMAIL
+  OUTLOOK
+  YAHOO
+  IMAP
+}
+
+enum RemotePreference {
+  REMOTE_ONLY
+  HYBRID_OK
+  ON_SITE_OK
+  NO_PREFERENCE
+}
+
+// ============================================================
+// TABLE: users
+// Core authentication table. One row per account.
+// ============================================================
+model User {
+  id                String    @id @default(uuid())
+  email             String    @unique
+  passwordHash      String?   @map("password_hash")
+  phone             String?
+  whatsappNumber    String?   @map("whatsapp_number")
+  role              UserRole  @default(USER)
+  isVerified        Boolean   @default(false) @map("is_verified")
+  isActive          Boolean   @default(true)  @map("is_active")
+  lastLoginAt       DateTime? @map("last_login_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt      @map("updated_at")
+
+  // Relations
+  profile           Profile?
+  resumes           Resume[]
+  skills            Skill[]
+  jobPreferences    JobPreference?
+  jobMatches        JobMatch[]
+  applications      Application[]
+  emailAccounts     UserEmailAccount[]
+  emailThreads      EmailThread[]
+  followUpLogs      FollowupLog[]
+  interviewSchedules InterviewSchedule[]
+  notifications     Notification[]
+  subscription      Subscription?
+
+  @@map("users")
+  @@index([email])
+  @@index([whatsappNumber])
+  @@index([createdAt])
+}
+
+// ============================================================
+// TABLE: profiles
+// Extended user profile data. 1:1 with users.
+// ============================================================
+model Profile {
+  id                String    @id @default(uuid())
+  userId            String    @unique @map("user_id")
+  firstName         String    @map("first_name")
+  lastName          String    @map("last_name")
+  headline          String?   // e.g. "Senior Full Stack Developer"
+  bio               String?
+  location          String?
+  country           String?
+  linkedinUrl       String?   @map("linkedin_url")
+  githubUrl         String?   @map("github_url")
+  portfolioUrl      String?   @map("portfolio_url")
+  avatarUrl         String?   @map("avatar_url")
+  yearsExperience   Int?      @map("years_experience")
+  currentCompany    String?   @map("current_company")
+  currentTitle      String?   @map("current_title")
+  seniorityLevel    String?   @map("seniority_level") // junior/mid/senior/lead/principal
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt      @map("updated_at")
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+  @@index([userId])
+  @@index([location])
+}
+
+// ============================================================
+// TABLE: resumes
+// Stores uploaded resume files + AI-parsed content.
+// A user can have multiple resume versions.
+// ============================================================
+model Resume {
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  fileName          String    @map("file_name")
+  fileUrl           String    @map("file_url")     // S3 URL
+  fileSize          Int?      @map("file_size")     // bytes
+  mimeType          String?   @map("mime_type")
+  version           Int       @default(1)
+  isActive          Boolean   @default(true) @map("is_active")
+  parsedText        String?   @map("parsed_text")   // raw extracted text
+  parsedJson        Json?     @map("parsed_json")   // AI structured output
+  // parsedJson shape: { skills[], experience[], education[], summary, title }
+  aiProcessedAt     DateTime? @map("ai_processed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt      @map("updated_at")
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  applications      Application[]
+  tailoredResumes   TailoredResume[]
+
+  @@map("resumes")
+  @@index([userId])
+  @@index([userId, isActive])
+  @@index([createdAt])
+}
+
+// ============================================================
+// TABLE: tailored_resumes
+// AI-tailored version of a resume for a specific job.
+// ============================================================
+model TailoredResume {
+  id                String    @id @default(uuid())
+  resumeId          String    @map("resume_id")
+  jobListingId      String    @map("job_listing_id")
+  tailoredText      String    @map("tailored_text")
+  tailoredFileUrl   String?   @map("tailored_file_url") // Generated PDF in S3
+  changes           Json?     // Summary of what was changed
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  resume            Resume      @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+  jobListing        JobListing  @relation(fields: [jobListingId], references: [id], onDelete: Cascade)
+  applications      Application[]
+
+  @@map("tailored_resumes")
+  @@unique([resumeId, jobListingId])
+  @@index([resumeId])
+  @@index([jobListingId])
+}
+
+// ============================================================
+// TABLE: skills
+// User's extracted + manually added skills.
+// ============================================================
+model Skill {
+  id                String            @id @default(uuid())
+  userId            String            @map("user_id")
+  name              String            // e.g. "React.js", "Python", "AWS"
+  category          String?           // e.g. "Frontend", "Cloud", "Management"
+  proficiency       SkillProficiency  @default(INTERMEDIATE)
+  yearsExperience   Float?            @map("years_experience")
+  isExtracted       Boolean           @default(true)  @map("is_extracted") // vs manually added
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  // Relations
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("skills")
+  @@unique([userId, name])
+  @@index([userId])
+  @@index([name])
+  @@index([category])
+}
+
+// ============================================================
+// TABLE: job_preferences
+// User's job search criteria for auto-discovery.
+// ============================================================
+model JobPreference {
+  id                    String            @id @default(uuid())
+  userId                String            @unique @map("user_id")
+  targetRoles           String[]          @map("target_roles")       // ["Software Engineer", "Full Stack Dev"]
+  preferredLocations    String[]          @map("preferred_locations")
+  jobTypes              JobType[]         @map("job_types")
+  remotePreference      RemotePreference  @default(NO_PREFERENCE)    @map("remote_preference")
+  salaryMin             Int?              @map("salary_min")
+  salaryMax             Int?              @map("salary_max")
+  salaryCurrency        String?           @default("USD")            @map("salary_currency")
+  industries            String[]          @default([])
+  experienceLevels      String[]          @map("experience_levels")  // ["junior", "mid", "senior"]
+  keywords              String[]          @default([])               // must-have keywords
+  excludedCompanies     String[]          @default([])               @map("excluded_companies")
+  excludedKeywords      String[]          @default([])               @map("excluded_keywords")
+  autoApplyEnabled      Boolean           @default(false)            @map("auto_apply_enabled")
+  minMatchScore         Int               @default(75)               @map("min_match_score")    // 0-100
+  maxApplicationsPerDay Int               @default(10)               @map("max_applications_per_day")
+  searchPlatforms       JobSource[]       @default([LINKEDIN, INDEED]) @map("search_platforms")
+  createdAt             DateTime          @default(now())            @map("created_at")
+  updatedAt             DateTime          @updatedAt                 @map("updated_at")
+
+  // Relations
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("job_preferences")
+  @@index([userId])
+}
+
+// ============================================================
+// TABLE: job_listings
+// All scraped / discovered job postings.
+// ============================================================
+model JobListing {
+  id                String    @id @default(uuid())
+  title             String
+  company           String
+  companyLogoUrl    String?   @map("company_logo_url")
+  location          String?
+  country           String?
+  jobType           JobType?  @map("job_type")
+  remoteType        RemoteType? @map("remote_type")
+  description       String    // Full JD text
+  requirements      String?   // Extracted requirements section
+  salaryMin         Int?      @map("salary_min")
+  salaryMax         Int?      @map("salary_max")
+  salaryCurrency    String?   @map("salary_currency")
+  experienceLevel   String?   @map("experience_level")
+  sourcePlatform    JobSource @map("source_platform")
+  sourceUrl         String    @unique @map("source_url")   // Original job URL
+  sourceJobId       String?   @map("source_job_id")        // Platform's internal ID
+  applicationEmail  String?   @map("application_email")
+  postedAt          DateTime? @map("posted_at")
+  expiresAt         DateTime? @map("expires_at")
+  isActive          Boolean   @default(true) @map("is_active")
+  scrapedAt         DateTime  @default(now()) @map("scraped_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  jobMatches        JobMatch[]
+  applications      Application[]
+  tailoredResumes   TailoredResume[]
+
+  @@map("job_listings")
+  @@index([company])
+  @@index([sourcePlatform])
+  @@index([title])
+  @@index([location])
+  @@index([isActive])
+  @@index([postedAt])
+  @@index([createdAt])
+}
+
+// ============================================================
+// TABLE: job_matches
+// AI-computed match scores between a user and job listing.
+// ============================================================
+model JobMatch {
+  id                String              @id @default(uuid())
+  userId            String              @map("user_id")
+  jobListingId      String              @map("job_listing_id")
+  matchScore        Int                 @map("match_score")       // 0-100
+  matchExplanation  String?             @map("match_explanation")
+  missingSkills     String[]            @default([])              @map("missing_skills")
+  strengthAreas     String[]            @default([])              @map("strength_areas")
+  recommendation    MatchRecommendation @map("recommendation")
+  aiModel           String?             @map("ai_model")          // claude model used
+  tokensUsed        Int?                @map("tokens_used")
+  scoredAt          DateTime            @default(now())           @map("scored_at")
+
+  // Relations
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobListing        JobListing  @relation(fields: [jobListingId], references: [id], onDelete: Cascade)
+
+  @@map("job_matches")
+  @@unique([userId, jobListingId])
+  @@index([userId])
+  @@index([jobListingId])
+  @@index([matchScore])
+  @@index([userId, matchScore])
+}
+
+// ============================================================
+// TABLE: applications
+// Tracks every job application attempt.
+// ============================================================
+model Application {
+  id                    String            @id @default(uuid())
+  userId                String            @map("user_id")
+  jobListingId          String            @map("job_listing_id")
+  resumeId              String?           @map("resume_id")            // Original resume used
+  tailoredResumeId      String?           @map("tailored_resume_id")   // Tailored version used
+  status                ApplicationStatus @default(PENDING)
+  appliedAt             DateTime?         @map("applied_at")
+  appliedVia            String?           @map("applied_via")          // "bot" | "manual" | "email"
+  confirmationUrl       String?           @map("confirmation_url")
+  screenshotUrl         String?           @map("screenshot_url")       // S3 URL of confirm screenshot
+  coverLetter           String?           @map("cover_letter")
+  customAnswers         Json?             @map("custom_answers")        // Q&A for form fields
+  notes                 String?
+  botJobId              String?           @map("bot_job_id")           // BullMQ job ID for tracking
+  failureReason         String?           @map("failure_reason")
+  followUpCount         Int               @default(0) @map("follow_up_count")
+  lastFollowUpAt        DateTime?         @map("last_follow_up_at")
+  createdAt             DateTime          @default(now())              @map("created_at")
+  updatedAt             DateTime          @updatedAt                   @map("updated_at")
+
+  // Relations
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobListing            JobListing        @relation(fields: [jobListingId], references: [id], onDelete: Cascade)
+  resume                Resume?           @relation(fields: [resumeId], references: [id])
+  tailoredResume        TailoredResume?   @relation(fields: [tailoredResumeId], references: [id])
+  statusHistory         ApplicationStatusHistory[]
+  emailThreads          EmailThread[]
+  followUpLogs          FollowupLog[]
+  interviewSchedules    InterviewSchedule[]
+
+  @@map("applications")
+  @@unique([userId, jobListingId])
+  @@index([userId])
+  @@index([jobListingId])
+  @@index([status])
+  @@index([userId, status])
+  @@index([appliedAt])
+  @@index([createdAt])
+}
+
+// ============================================================
+// TABLE: application_status_history
+// Immutable audit trail of every status change.
+// ============================================================
+model ApplicationStatusHistory {
+  id              String            @id @default(uuid())
+  applicationId   String            @map("application_id")
+  fromStatus      ApplicationStatus? @map("from_status")
+  toStatus        ApplicationStatus  @map("to_status")
+  changedBy       String?           @map("changed_by")  // "system" | "user" | userId
+  note            String?
+  metadata        Json?             // Additional event context
+  changedAt       DateTime          @default(now()) @map("changed_at")
+
+  // Relations
+  application     Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@map("application_status_history")
+  @@index([applicationId])
+  @@index([changedAt])
+}
+
+// ============================================================
+// TABLE: user_email_accounts
+// Connected email accounts per user (Gmail / IMAP).
+// ============================================================
+model UserEmailAccount {
+  id              String        @id @default(uuid())
+  userId          String        @map("user_id")
+  email           String
+  provider        EmailProvider
+  accessToken     String?       @map("access_token")   // Encrypted
+  refreshToken    String?       @map("refresh_token")  // Encrypted
+  tokenExpiresAt  DateTime?     @map("token_expires_at")
+  imapHost        String?       @map("imap_host")
+  imapPort        Int?          @map("imap_port")
+  imapPassword    String?       @map("imap_password")  // Encrypted
+  isActive        Boolean       @default(true) @map("is_active")
+  lastSyncAt      DateTime?     @map("last_sync_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt      @map("updated_at")
+
+  // Relations
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailThreads    EmailThread[]
+
+  @@map("user_email_accounts")
+  @@unique([userId, email])
+  @@index([userId])
+  @@index([email])
+}
+
+// ============================================================
+// TABLE: email_threads
+// Recruiter email threads linked to applications.
+// ============================================================
+model EmailThread {
+  id                  String               @id @default(uuid())
+  userId              String               @map("user_id")
+  applicationId       String?              @map("application_id")
+  emailAccountId      String               @map("email_account_id")
+  externalThreadId    String               @map("external_thread_id")  // Gmail thread ID / IMAP UID
+  subject             String?
+  senderEmail         String               @map("sender_email")
+  senderName          String?              @map("sender_name")
+  classification      EmailClassification?
+  classificationScore Float?               @map("classification_score") // AI confidence 0-1
+  bodySnippet         String?              @map("body_snippet")
+  rawContent          String?              @map("raw_content")          // Full email body
+  attachmentUrls      String[]             @default([]) @map("attachment_urls")
+  isRead              Boolean              @default(false) @map("is_read")
+  receivedAt          DateTime             @map("received_at")
+  createdAt           DateTime             @default(now()) @map("created_at")
+
+  // Relations
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  application         Application?       @relation(fields: [applicationId], references: [id])
+  emailAccount        UserEmailAccount   @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+
+  @@map("email_threads")
+  @@index([userId])
+  @@index([applicationId])
+  @@index([emailAccountId])
+  @@index([classification])
+  @@index([receivedAt])
+  @@index([externalThreadId])
+}
+
+// ============================================================
+// TABLE: followup_logs
+// Records every follow-up email sent per application.
+// ============================================================
+model FollowupLog {
+  id              String          @id @default(uuid())
+  applicationId   String          @map("application_id")
+  userId          String          @map("user_id")
+  emailSubject    String          @map("email_subject")
+  emailBody       String          @map("email_body")
+  recipientEmail  String          @map("recipient_email")
+  followUpNumber  Int             @map("follow_up_number") // 1 or 2
+  status          FollowUpStatus  @default(SCHEDULED)
+  scheduledAt     DateTime        @map("scheduled_at")
+  sentAt          DateTime?       @map("sent_at")
+  failureReason   String?         @map("failure_reason")
+  aiModel         String?         @map("ai_model")
+  tokensUsed      Int?            @map("tokens_used")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt      @map("updated_at")
+
+  // Relations
+  application     Application     @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("followup_logs")
+  @@index([applicationId])
+  @@index([userId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([sentAt])
+}
+
+// ============================================================
+// TABLE: interview_schedules
+// Tracks all scheduled interviews per application.
+// ============================================================
+model InterviewSchedule {
+  id                  String          @id @default(uuid())
+  applicationId       String          @map("application_id")
+  userId              String          @map("user_id")
+  interviewType       InterviewType   @map("interview_type")
+  status              InterviewStatus @default(SCHEDULED)
+  scheduledAt         DateTime        @map("scheduled_at")
+  durationMinutes     Int?            @map("duration_minutes")
+  timezone            String?
+  interviewerName     String?         @map("interviewer_name")
+  interviewerEmail    String?         @map("interviewer_email")
+  meetingLink         String?         @map("meeting_link")
+  meetingPlatform     String?         @map("meeting_platform") // "Zoom"|"Meet"|"Teams"
+  location            String?
+  notes               String?
+  prepDocUrl          String?         @map("prep_doc_url")     // S3 URL for AI prep PDF
+  prepGeneratedAt     DateTime?       @map("prep_generated_at")
+  round               Int             @default(1)              // Interview round number
+  createdAt           DateTime        @default(now())          @map("created_at")
+  updatedAt           DateTime        @updatedAt               @map("updated_at")
+
+  // Relations
+  application         Application     @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  user                User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("interview_schedules")
+  @@index([applicationId])
+  @@index([userId])
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+// ============================================================
+// TABLE: notifications
+// All notifications sent to users across all channels.
+// ============================================================
+model Notification {
+  id              String                @id @default(uuid())
+  userId          String                @map("user_id")
+  type            NotificationType
+  channel         NotificationChannel
+  title           String
+  body            String
+  data            Json?                 // Contextual data (applicationId, jobId, etc.)
+  isRead          Boolean               @default(false) @map("is_read")
+  isSent          Boolean               @default(false) @map("is_sent")
+  sentAt          DateTime?             @map("sent_at")
+  readAt          DateTime?             @map("read_at")
+  failureReason   String?               @map("failure_reason")
+  retryCount      Int                   @default(0) @map("retry_count")
+  createdAt       DateTime              @default(now()) @map("created_at")
+
+  // Relations
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+  @@index([userId])
+  @@index([userId, isRead])
+  @@index([type])
+  @@index([channel])
+  @@index([isSent])
+  @@index([createdAt])
+}
+
+// ============================================================
+// TABLE: subscriptions
+// SaaS billing and plan management per user.
+// ============================================================
+model Subscription {
+  id                    String              @id @default(uuid())
+  userId                String              @unique @map("user_id")
+  plan                  SubscriptionPlan    @default(FREE)
+  status                SubscriptionStatus  @default(ACTIVE)
+  stripeCustomerId      String?             @unique @map("stripe_customer_id")
+  stripeSubscriptionId  String?             @unique @map("stripe_subscription_id")
+  stripePriceId         String?             @map("stripe_price_id")
+  currentPeriodStart    DateTime?           @map("current_period_start")
+  currentPeriodEnd      DateTime?           @map("current_period_end")
+  cancelAtPeriodEnd     Boolean             @default(false) @map("cancel_at_period_end")
+  cancelledAt           DateTime?           @map("cancelled_at")
+  trialStart            DateTime?           @map("trial_start")
+  trialEnd              DateTime?           @map("trial_end")
+  // Plan limits
+  monthlyApplyLimit     Int                 @default(10)  @map("monthly_apply_limit")
+  monthlyApplyUsed      Int                 @default(0)   @map("monthly_apply_used")
+  aiCallsLimit          Int                 @default(50)  @map("ai_calls_limit")
+  aiCallsUsed           Int                 @default(0)   @map("ai_calls_used")
+  createdAt             DateTime            @default(now()) @map("created_at")
+  updatedAt             DateTime            @updatedAt      @map("updated_at")
+
+  // Relations
+  user                  User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+  @@index([userId])
+  @@index([plan])
+  @@index([status])
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+}

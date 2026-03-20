@@ -1,0 +1,99 @@
+# ══════════════════════════════════════════════════════════════
+# Prometheus — Scrape Configuration
+# Job Hunter AI — Production
+#
+# Scrape targets:
+#   api             :3001/metrics   — HTTP latency, request counts
+#   workers         :9100/metrics   — Job duration, queue depth, bot rate
+#   postgres        :9187           — DB query time, connection pool
+#   redis           :9121           — Command latency, memory, keys
+#   nginx           :9113           — Connection rate, upstream response
+#   loki            :3100/metrics   — Log ingestion rate
+#   cadvisor        :8080/metrics   — Container CPU/memory/network
+# ══════════════════════════════════════════════════════════════
+
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  scrape_timeout:      10s
+  external_labels:
+    env:     production
+    cluster: job-hunter-ai
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+
+  # ── API Service ──────────────────────────────────────────
+  - job_name: api
+    static_configs:
+      - targets: ['api:3001']
+        labels:
+          service: api
+    metrics_path: /metrics
+
+  # ── Worker Services ──────────────────────────────────────
+  - job_name: workers
+    static_configs:
+      - targets:
+          - 'worker-scraper:9100'
+          - 'worker-ai:9100'
+          - 'worker-bot:9100'
+          - 'worker-email:9100'
+          - 'worker-notification:9100'
+          - 'worker-resume:9100'
+          - 'worker-prep:9100'
+    relabel_configs:
+      - source_labels: [__address__]
+        regex:         '(worker-[^:]+):\d+'
+        target_label:  service
+        replacement:   $1
+
+  # ── PostgreSQL Exporter ──────────────────────────────────
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels: { service: postgres }
+
+  # ── Redis Exporter ───────────────────────────────────────
+  - job_name: redis
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels: { service: redis }
+
+  # ── Nginx Exporter ───────────────────────────────────────
+  - job_name: nginx
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+        labels: { service: nginx }
+
+  # ── Loki ─────────────────────────────────────────────────
+  - job_name: loki
+    static_configs:
+      - targets: ['loki:3100']
+        labels: { service: loki }
+    metrics_path: /metrics
+
+  # ── Promtail ─────────────────────────────────────────────
+  - job_name: promtail
+    static_configs:
+      - targets: ['promtail:9080']
+        labels: { service: promtail }
+
+  # ── cAdvisor ─────────────────────────────────────────────
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels: { service: cadvisor }
+
+  # ── Self-monitoring ───────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+        labels: { service: prometheus }

@@ -1,0 +1,27 @@
+{
+  "name": "@job-hunter/database",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Prisma database client and schema",
+  "main": "dist/index.js",
+  "scripts": {
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:prod": "prisma migrate deploy",
+    "db:seed": "tsx src/seeds/index.ts",
+    "db:reset": "prisma migrate reset --force",
+    "db:studio": "prisma studio",
+    "build": "tsc",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.14.0",
+    "tsx": "^4.15.0",
+    "typescript": "^5.4.0",
+    "@types/node": "^20.14.0"
+  },
+  "types": "dist/index.d.ts"
+}

@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "Job Hunter AI",
+    "slug": "job-hunter-ai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": { "resizeMode": "contain", "backgroundColor": "#050608" },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "ai.jobhunter.app",
+      "infoPlist": {
+        "NSUserNotificationUsageDescription": "Job Hunter sends interview reminders and application updates."
+      }
+    },
+    "android": {
+      "adaptiveIcon": { "backgroundColor": "#050608" },
+      "package": "ai.jobhunter.app",
+      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE"]
+    },
+    "plugins": [
+      ["expo-notifications", {
+        "icon": "./assets/notification-icon.png",
+        "color": "#00ff88",
+        "defaultChannel": "default"
+      }]
+    ]
+  }
+}

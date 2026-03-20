@@ -1,0 +1,151 @@
+# ══════════════════════════════════════════════════════════════
+# Prometheus Alerting Rules — Job Hunter AI
+# ══════════════════════════════════════════════════════════════
+groups:
+
+  # ── API Reliability ───────────────────────────────────────
+  - name: api_reliability
+    interval: 1m
+    rules:
+      - alert: APIHighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{service="api", status_code=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{service="api"}[5m]))
+          ) > 0.05
+        for: 3m
+        labels:
+          severity: critical
+          service:  api
+        annotations:
+          summary:     "API error rate above 5%"
+          description: "{{ $value | humanizePercentage }} of API requests are returning 5xx."
+
+      - alert: APIHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{service="api"}[5m])) by (le, route)
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          service:  api
+        annotations:
+          summary:     "API P95 latency above 2s on {{ $labels.route }}"
+          description: "95th percentile latency is {{ $value | humanizeDuration }}."
+
+      - alert: APIDown
+        expr: up{service="api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service:  api
+        annotations:
+          summary: "API service is down"
+
+  # ── Worker Reliability ────────────────────────────────────
+  - name: worker_reliability
+    interval: 1m
+    rules:
+      - alert: WorkerHighFailureRate
+        expr: |
+          (
+            sum by (queue) (rate(worker_jobs_total{status="failed"}[10m]))
+            /
+            sum by (queue) (rate(worker_jobs_total[10m]))
+          ) > 0.20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary:     "Worker failure rate above 20% for queue {{ $labels.queue }}"
+          description: "{{ $value | humanizePercentage }} of jobs in {{ $labels.queue }} are failing."
+
+      - alert: WorkerDLQGrowing
+        expr: worker_dlq_depth > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary:     "Dead-letter queue depth is {{ $value }}"
+          description: "More than 50 permanently-failed jobs in the DLQ. Review and remediate."
+
+      - alert: BotLowSuccessRate
+        expr: |
+          (
+            sum(rate(bot_applications_total{status="applied"}[1h]))
+            /
+            sum(rate(bot_applications_total{status=~"applied|failed"}[1h]))
+          ) < 0.60
+        for: 15m
+        labels:
+          severity: warning
+          service:  worker-bot
+        annotations:
+          summary:     "Bot success rate below 60% in the last hour"
+          description: "{{ $value | humanizePercentage }} of application attempts succeeded."
+
+      - alert: BotCaptchaSpike
+        expr: sum(rate(bot_captcha_encounters_total[15m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          service:  worker-bot
+        annotations:
+          summary: "Bot encountering >0.5 CAPTCHAs/min — stealth profile may need rotation"
+
+  # ── Infrastructure ────────────────────────────────────────
+  - name: infrastructure
+    interval: 1m
+    rules:
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          service:  redis
+        annotations:
+          summary: "Redis using >85% of max memory"
+
+      - alert: PostgresConnectionsHigh
+        expr: pg_stat_activity_count > 150
+        for: 5m
+        labels:
+          severity: warning
+          service:  postgres
+        annotations:
+          summary: "PostgreSQL has {{ $value }} active connections (limit 200)"
+
+      - alert: ContainerHighMemory
+        expr: |
+          (container_memory_usage_bytes{name=~"jh-.*"} / container_spec_memory_limit_bytes{name=~"jh-.*"})
+          > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary:     "Container {{ $labels.name }} using >90% of memory limit"
+          description: "{{ $value | humanizePercentage }} memory usage."
+
+  # ── Logging pipeline ─────────────────────────────────────
+  - name: logging_pipeline
+    interval: 2m
+    rules:
+      - alert: LokiIngestionErrors
+        expr: sum(rate(loki_request_duration_seconds_count{status_code=~"5.."}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service:  loki
+        annotations:
+          summary: "Loki is returning 5xx errors — log ingestion may be failing"
+
+      - alert: PromtailDroppedLogs
+        expr: sum(rate(promtail_dropped_entries_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service:  promtail
+        annotations:
+          summary: "Promtail is dropping >10 log entries/s"

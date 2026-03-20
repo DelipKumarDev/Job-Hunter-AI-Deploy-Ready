@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "paths": {
+      "@job-hunter/shared":           ["../../packages/shared/src/index.ts"],
+      "@job-hunter/shared/*":         ["../../packages/shared/src/*"],
+      "@job-hunter/database":         ["../../packages/database/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
